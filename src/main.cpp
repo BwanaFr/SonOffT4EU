@@ -52,8 +52,12 @@ size_t content_len;
 enum class SwitchState {IDLE, PRESSED_SHORT, PRESSED_LONG, RELEASED_SHORT, RELEASED_LONG};
 SwitchState swState = SwitchState::IDLE;
 uint16_t ledOnValue = 0;
-
-
+int ledBlinkRate = -1;
+uint32_t lastBlinkTime = 0;
+const int WIFI_LED_RATE = 500;
+const int MQTT_LED_RATE = 100;
+const int AP_LED_RATE = 2000;
+const int NO_LED_RATE = -1;
 
 /**
  * Callback of MQTT
@@ -89,6 +93,7 @@ void configureMQTTServices(){
     //Setup MQTT client callbacks and port
     client.setServer(mqttServer.getValue().c_str(), mqttPort.getValue());
     client.setCallback(callback);
+    mqttState = MQTTConState::Connecting;
   }else{
     mqttState = MQTTConState::NotUsed;
   }
@@ -99,20 +104,21 @@ void configureMQTTServices(){
  */
 void newState(ESPEasyCfgState state) {
   if(state == ESPEasyCfgState::Reconfigured){
-    Serial.println("ESPEasyCfgState::Reconfigured");
-    //client.disconnect();
     //Don't use MQTT if server is not filled
     if(mqttServer.getValue().isEmpty()){
       mqttState = MQTTConState::NotUsed;
       swMode.setValue("BASIC");
+      ledBlinkRate = NO_LED_RATE;
     }else{
       configureMQTTServices();
       client.disconnect();
     }
   }else if(state == ESPEasyCfgState::Connected){
-    Serial.println("ESPEasyCfgState::Connected");
-    Serial.print("DNS: ");
-    Serial.println(WiFi.dnsIP());
+    if(mqttServer.getValue().isEmpty()){
+      ledBlinkRate = NO_LED_RATE;
+    }
+  }else if(state == ESPEasyCfgState::AP){
+    ledBlinkRate = AP_LED_RATE;
   }
 }
 
@@ -198,6 +204,16 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(BUTTON_PIN, INPUT);
   digitalWrite(RELAY_PIN, 0);
+  byte mac[6];                     // the MAC address of your Wifi shield
+  WiFi.macAddress(mac);
+  String clientId = "May MAC is : ";
+  clientId += String(mac[0], HEX);
+  clientId += String(mac[1], HEX);
+  clientId += String(mac[2], HEX);
+  clientId += String(mac[3], HEX);
+  clientId += String(mac[4], HEX);
+  clientId += String(mac[5], HEX);
+  Serial.println(clientId);
 
   captivePortal.setLedPin(0xFF);
   captivePortal.setLedActiveLow(true);
@@ -254,10 +270,19 @@ void publishValuesToMQTT(){
 void reconnect() {
   //Don't use MQTT if server is not filled
   if(mqttServer.getValue().isEmpty()){
+    ledBlinkRate = NO_LED_RATE;
     return;
   }
   // Loop until we're reconnected
   if (!client.connected() && ((millis()-lastMQTTConAttempt)>5000)) {
+    if(captivePortal.getState() == ESPEasyCfgState::Connected){
+      ledBlinkRate = MQTT_LED_RATE;
+    }else if(captivePortal.getState() == ESPEasyCfgState::AP){
+      ledBlinkRate = AP_LED_RATE;
+    }else{
+      ledBlinkRate = WIFI_LED_RATE;
+    }
+    
     mqttState = MQTTConState::Connecting;
     IPAddress mqttServerIP;
     int ret = WiFi.hostByName(mqttServer.getValue().c_str(), mqttServerIP);
@@ -289,6 +314,7 @@ void reconnect() {
       mqttState = MQTTConState::Connected;
       client.subscribe(mqttRelayService.c_str());
       client.subscribe(mqttLedService.c_str());
+      ledBlinkRate = NO_LED_RATE;
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -389,8 +415,16 @@ void loop() {
         }
       }
   }
-  if(previousLedValue != ledValue)
-    analogWrite(LED_PIN, ledValue);
-  previousLedValue = ledValue;
+  if(ledBlinkRate>0){
+    if((now - lastBlinkTime) > static_cast<uint32_t>(ledBlinkRate)){
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      lastBlinkTime = now;
+    }
+  }else{
+    if(previousLedValue != ledValue)
+      analogWrite(LED_PIN, ledValue);
+    previousLedValue = ledValue;
+  }
+  
   yield();
 }
