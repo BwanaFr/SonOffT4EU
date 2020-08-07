@@ -23,14 +23,14 @@ AsyncWebServer server(80);
 ESPEasyCfg captivePortal(&server, "Sonoff T4EU");
 //Custom application parameters
 ESPEasyCfgParameterGroup mqttParamGrp("MQTT");
-ESPEasyCfgParameter<String> mqttServer("mqttServer", "MQTT server", "");
+ESPEasyCfgParameter<String> mqttServer("mqttServer", "MQTT server", "", "Name or IP of MQTT broker. Empty if not using MQTT.");
 ESPEasyCfgParameter<String> mqttUser("mqttUser", "MQTT username", "homeassistant");
 ESPEasyCfgParameter<String> mqttPass("mqttPass", "MQTT password", "");
 ESPEasyCfgParameter<int> mqttPort("mqttPort", "MQTT port", 1883);
-ESPEasyCfgParameter<String> mqttName("mqttName", "MQTT name", "T4EU");
+ESPEasyCfgParameter<String> mqttName("mqttName", "MQTT name", "T4EU", "", "{\"reuired\":\"\"}");
 
 ESPEasyCfgParameterGroup switchParamGrp("Switch");
-ESPEasyCfgParameter<uint32_t> swLongPress("swLongPress", "Long press duration (ms)", 2000);
+ESPEasyCfgParameter<uint32_t> swLongPress("swLongPress", "Long press duration (ms)", 2000, "", "{\"min\":\"100\",\"max\":\"60000\"}");
 ESPEasyCfgEnumParameter swMode("swMode", "Switch mode", "BASIC;SMART");
 
 //MQTT objects
@@ -38,9 +38,9 @@ WiFiClient espClient;                                   // TCP client
 PubSubClient client(espClient);                         // MQTT object
 const unsigned long mqttPostingInterval = 10L * 1000L;  // Delay between updates, in milliseconds
 static unsigned long mqttLastPostTime = 0;              // Last time you sent to the server, in milliseconds
-static char mqttRelayService[128];                      // Relay MQTT service name
-static char mqttLedService[128];                        // LED MQTT service name
-static char mqttStatusService[128];                     // Status MQTT service name
+String mqttRelayService;                                // Relay MQTT service name
+String mqttLedService;                                  // LED MQTT service name
+String mqttStatusService;                               // Status MQTT service name
 uint32_t lastMQTTConAttempt = 0;                        // Last MQTT connection attempt
 enum class MQTTConState {Connecting, Connected, Disconnected, NotUsed};
 MQTTConState mqttState = MQTTConState::Disconnected;
@@ -52,6 +52,47 @@ size_t content_len;
 enum class SwitchState {IDLE, PRESSED_SHORT, PRESSED_LONG, RELEASED_SHORT, RELEASED_LONG};
 SwitchState swState = SwitchState::IDLE;
 uint16_t ledOnValue = 0;
+
+
+
+/**
+ * Callback of MQTT
+ */
+void callback(char* topic, byte* payload, unsigned int length) {
+  String data;
+  for (unsigned int i = 0; i < length; i++) {
+    data += (char)payload[i];
+  }
+  String strTopic(topic);
+  if(strTopic == mqttRelayService){
+    if(data == "ON"){
+      digitalWrite(RELAY_PIN, HIGH);
+    }else{
+      digitalWrite(RELAY_PIN, LOW);
+    }
+  }else if(strTopic == mqttLedService){
+    ledOnValue = data.toInt();
+    if(ledOnValue > 1023){
+      ledOnValue = 1023;
+    }else if(ledOnValue < 0){
+      ledOnValue = 0;
+    }
+  }
+}
+
+void configureMQTTServices(){
+  if(!mqttServer.getValue().isEmpty()){
+      //Build MQTT service names
+    mqttStatusService =  mqttName.getValue() +  "/Status";
+    mqttRelayService =  mqttName.getValue() + "/Relay";
+    mqttLedService = mqttName.getValue() + "/Led";
+    //Setup MQTT client callbacks and port
+    client.setServer(mqttServer.getValue().c_str(), mqttPort.getValue());
+    client.setCallback(callback);
+  }else{
+    mqttState = MQTTConState::NotUsed;
+  }
+}
 
 /**
  * Call back on parameter change
@@ -65,6 +106,7 @@ void newState(ESPEasyCfgState state) {
       mqttState = MQTTConState::NotUsed;
       swMode.setValue("BASIC");
     }else{
+      configureMQTTServices();
       client.disconnect();
     }
   }else if(state == ESPEasyCfgState::Connected){
@@ -103,35 +145,15 @@ void publishValuesToJSON(String& str){
 }
 
 /**
- * Callback of MQTT
- */
-void callback(char* topic, byte* payload, unsigned int length) {
-  String data;
-  for (unsigned int i = 0; i < length; i++) {
-    data += (char)payload[i];
-  }
-  if(strcmp(topic, mqttRelayService) == 0){
-    if(data == "ON"){
-      digitalWrite(RELAY_PIN, HIGH);
-    }else{
-      digitalWrite(RELAY_PIN, LOW);
-    }
-  }else if(strcmp(topic, mqttLedService) == 0){
-    ledOnValue = data.toInt();
-    if(ledOnValue > 1023){
-      ledOnValue = 1023;
-    }else if(ledOnValue < 0){
-      ledOnValue = 0;
-    }
-  }
-}
-
-/**
  * Callback of the update request
  */
 void handleUpdate(AsyncWebServerRequest *request) {
-  char* html = "<form method='POST' action='/doUpdate' enctype='multipart/form-data'><input type='file' name='update'><input type='submit' value='Update'></form>";
-  request->send(200, "text/html", html);
+  String html = "Last firmware build :";
+  html += __DATE__;
+  html += "&nbsp;";
+  html += __TIME__;
+  html += "<form method='POST' action='/doUpdate' enctype='multipart/form-data'><input type='file' name='update'><input type='submit' value='Update'></form>";
+  request->send(200, "text/html", html.c_str());
 }
 
 /**
@@ -195,16 +217,8 @@ void setup() {
   server.begin();
 
   //MQTT services
-  //Build MQTT service names
-  snprintf(mqttStatusService, 128, "%s/Status", mqttName.getValue().c_str());
-  snprintf(mqttRelayService, 128, "%s/Relay", mqttName.getValue().c_str());
-  snprintf(mqttLedService, 128, "%s/Led", mqttName.getValue().c_str());
-  //Setup MQTT client callbacks and port
-  client.setServer(mqttServer.getValue().c_str(), mqttPort.getValue());
-  client.setCallback(callback);
-  if(mqttServer.getValue().isEmpty()){
-    mqttState = MQTTConState::NotUsed;
-  }
+  configureMQTTServices();
+  
 
   //Serve HTTP pages (JSON values)
   server.on("/values", HTTP_GET, [=](AsyncWebServerRequest *request){
@@ -233,7 +247,7 @@ void publishValuesToMQTT(){
   if(client.connected()){
     String msg;
     publishValuesToJSON(msg);
-    client.publish(mqttStatusService, msg.c_str());
+    client.publish(mqttStatusService.c_str(), msg.c_str());
   }
 }
 
@@ -273,8 +287,8 @@ void reconnect() {
     if((ret == 1) && (client.connect(clientId.c_str(), mqttUser.getValue().c_str(), mqttPass.getValue().c_str()))) {
       Serial.println("connected");
       mqttState = MQTTConState::Connected;
-      client.subscribe(mqttRelayService);
-      client.subscribe(mqttLedService);
+      client.subscribe(mqttRelayService.c_str());
+      client.subscribe(mqttLedService.c_str());
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -340,16 +354,12 @@ void loop() {
     //Switch state changed, send to MQTT
     mqttLastPostTime = 0;
     if(swMode.toString() == "BASIC"){
-      Serial.println("Basic mode");
       //Basic mode, no smart bulb
       if(swState == SwitchState::RELEASED_SHORT)
         digitalWrite(RELAY_PIN, !digitalRead(RELAY_PIN));
         if(!digitalRead(RELAY_PIN))
           ledValue = 0;
     }else if(swMode.toString() == "SMART"){
-      Serial.println("Smart mode");
-      Serial.print("LED -> ");
-      Serial.println(ledValue);
       //Smart bulb
       if(mqttState != MQTTConState::Connected){
         //Act like the basic mode
