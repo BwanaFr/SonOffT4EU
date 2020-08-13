@@ -41,6 +41,7 @@ const unsigned long mqttPostingInterval = 10L * 1000L;  // Delay between updates
 static unsigned long mqttLastPostTime = 0;              // Last time you sent to the server, in milliseconds
 String mqttRelayService;                                // Relay MQTT service name
 String mqttLedService;                                  // LED MQTT service name
+String mqttModeService;                                 // Mode MQTT service name
 String mqttStatusService;                               // Status MQTT service name
 uint32_t lastMQTTConAttempt = 0;                        // Last MQTT connection attempt
 enum class MQTTConState {Connecting, Connected, Disconnected, NotUsed};
@@ -89,6 +90,12 @@ void callback(char* topic, byte* payload, unsigned int length) {
       ledOnValue.setValue(newVal);
       captivePortal.saveParameters();
     }
+  }else if(strTopic == mqttModeService){
+    if(data == "BASIC" || data == "SMART"){
+      swMode.setValue(data.c_str());
+      captivePortal.saveParameters();
+      mqttLastPostTime = 0;
+    }
   }
 }
 
@@ -97,6 +104,7 @@ void configureMQTTServices(){
       //Build MQTT service names
     mqttStatusService =  mqttName.getValue() +  "/Status";
     mqttRelayService =  mqttName.getValue() + "/Relay";
+    mqttModeService =  mqttName.getValue() + "/Mode";
     mqttLedService = mqttName.getValue() + "/Led";
     //Setup MQTT client callbacks and port
     client.setServer(mqttServer.getValue().c_str(), mqttPort.getValue());
@@ -327,6 +335,7 @@ void reconnect() {
       mqttState = MQTTConState::Connected;
       client.subscribe(mqttRelayService.c_str());
       client.subscribe(mqttLedService.c_str());
+      client.subscribe(mqttModeService.c_str());
       ledBlinkRate = NO_LED_RATE; 
       previousLedValue = -1;
     } else {
