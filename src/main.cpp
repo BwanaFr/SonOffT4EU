@@ -32,6 +32,7 @@ ESPEasyCfgParameter<String> mqttName("mqttName", "MQTT name", "T4EU", "", "{\"re
 ESPEasyCfgParameterGroup switchParamGrp("Switch");
 ESPEasyCfgParameter<uint32_t> swLongPress("swLongPress", "Long press duration (ms)", 2000, "", "{\"min\":\"100\",\"max\":\"60000\"}");
 ESPEasyCfgEnumParameter swMode("swMode", "Switch mode", "BASIC;SMART");
+ESPEasyCfgParameter<int> ledOnValue("ledValue", "LED on value", 1023);
 
 //MQTT objects
 WiFiClient espClient;                                   // TCP client
@@ -51,13 +52,13 @@ size_t content_len;
 //Switch management
 enum class SwitchState {IDLE, PRESSED_SHORT, PRESSED_LONG, RELEASED_SHORT, RELEASED_LONG};
 SwitchState swState = SwitchState::IDLE;
-uint16_t ledOnValue = 0;
-int ledBlinkRate = -1;
-uint32_t lastBlinkTime = 0;
 const int WIFI_LED_RATE = 500;
 const int MQTT_LED_RATE = 100;
 const int AP_LED_RATE = 2000;
 const int NO_LED_RATE = -1;
+int ledBlinkRate = WIFI_LED_RATE;
+uint32_t lastBlinkTime = 0;
+int previousLedValue = -1;
 
 /**
  * Callback of MQTT
@@ -75,11 +76,18 @@ void callback(char* topic, byte* payload, unsigned int length) {
       digitalWrite(RELAY_PIN, LOW);
     }
   }else if(strTopic == mqttLedService){
-    ledOnValue = data.toInt();
-    if(ledOnValue > 1023){
-      ledOnValue = 1023;
-    }else if(ledOnValue < 0){
-      ledOnValue = 0;
+    int dataVal = data.toInt();
+    int newVal = 0;
+    if(dataVal > 1023){
+      newVal = 1023;
+    }else if(dataVal < 0){
+      newVal = 0;
+    }else{
+      newVal = dataVal;
+    }
+    if(newVal != ledOnValue.getValue()){
+      ledOnValue.setValue(newVal);
+      captivePortal.saveParameters();
     }
   }
 }
@@ -111,11 +119,13 @@ void newState(ESPEasyCfgState state) {
       ledBlinkRate = NO_LED_RATE;
     }else{
       configureMQTTServices();
+      mqttLastPostTime = 0;
       client.disconnect();
     }
   }else if(state == ESPEasyCfgState::Connected){
     if(mqttServer.getValue().isEmpty()){
       ledBlinkRate = NO_LED_RATE;
+      previousLedValue = -1;
     }
   }else if(state == ESPEasyCfgState::AP){
     ledBlinkRate = AP_LED_RATE;
@@ -146,7 +156,7 @@ void publishValuesToJSON(String& str){
       break;
   }
   root["mode"] = swMode.toString();
-  root["LED"] = ledOnValue;
+  root["LED"] = ledOnValue.getValue();
   serializeJson(root, str);
 }
 
@@ -227,6 +237,8 @@ void setup() {
   captivePortal.addParameterGroup(&mqttParamGrp);
   switchParamGrp.add(&swLongPress);
   switchParamGrp.add(&swMode);
+  ledOnValue.setHidden(true);
+  switchParamGrp.add(&ledOnValue);
   captivePortal.addParameterGroup(&switchParamGrp);
   captivePortal.setStateHandler(newState);
   captivePortal.begin();
@@ -271,6 +283,7 @@ void reconnect() {
   //Don't use MQTT if server is not filled
   if(mqttServer.getValue().isEmpty()){
     ledBlinkRate = NO_LED_RATE;
+    previousLedValue = -1;
     return;
   }
   // Loop until we're reconnected
@@ -314,7 +327,8 @@ void reconnect() {
       mqttState = MQTTConState::Connected;
       client.subscribe(mqttRelayService.c_str());
       client.subscribe(mqttLedService.c_str());
-      ledBlinkRate = NO_LED_RATE;
+      ledBlinkRate = NO_LED_RATE; 
+      previousLedValue = -1;
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -366,12 +380,11 @@ SwitchState getSwitchState(bool &changed, uint32_t now){
 }
 
 void loop() {
-  static int previousLedValue = 0;
   uint32_t now = millis();
   //Keep captive portal active
   captivePortal.loop();
   
-  int ledValue = ledOnValue;
+  int ledValue = ledOnValue.getValue();
 
   //Touch switch logic 
   bool changed = false;
@@ -388,15 +401,19 @@ void loop() {
     }else if(swMode.toString() == "SMART"){
       //Smart bulb
       if(mqttState != MQTTConState::Connected){
-        //Act like the basic mode
+        //Act like in basic mode
         if(swState == SwitchState::RELEASED_SHORT)
           digitalWrite(RELAY_PIN, !digitalRead(RELAY_PIN));
           if(!digitalRead(RELAY_PIN))
             ledValue = 0;
       }else{
-        //Long press, toggle relay
+        //Force relay closed
+        digitalWrite(RELAY_PIN, true);
+        //Long press, change to BASIC mode
         if(swState == SwitchState::PRESSED_LONG){
-          digitalWrite(RELAY_PIN, !digitalRead(RELAY_PIN));
+          digitalWrite(RELAY_PIN, false);
+          swMode.setValue("BASIC");
+          captivePortal.saveParameters();
         }
       }
     }
@@ -421,9 +438,10 @@ void loop() {
       lastBlinkTime = now;
     }
   }else{
-    if(previousLedValue != ledValue)
-      analogWrite(LED_PIN, ledValue);
-    previousLedValue = ledValue;
+    if(previousLedValue != ledValue){
+      analogWrite(LED_PIN, 1023-ledValue);
+      previousLedValue = ledValue;
+    }
   }
   
   yield();
