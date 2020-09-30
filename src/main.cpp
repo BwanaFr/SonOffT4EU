@@ -12,11 +12,16 @@
 #define RELAY_PIN 12
 #define BUTTON_PIN 0
 #define LED_PIN 13
+#define BTN_LED_PIN 5
 #else
 #define RELAY_PIN 16
 #define BUTTON_PIN 0
 #define LED_PIN LED_BUILTIN
+#define BTN_LED_PIN 5
 #endif
+
+const int LED_ON_OFFSET = 10000;
+const int LED_PWM_MAX = 1023;
 
 //Objects for captive portal/MQTT
 AsyncWebServer server(80);
@@ -32,7 +37,8 @@ ESPEasyCfgParameter<String> mqttName("mqttName", "MQTT name", "T4EU", "", "{\"re
 ESPEasyCfgParameterGroup switchParamGrp("Switch");
 ESPEasyCfgParameter<uint32_t> swLongPress("swLongPress", "Long press duration (ms)", 2000, "", "{\"min\":\"100\",\"max\":\"60000\"}");
 ESPEasyCfgEnumParameter swMode("swMode", "Switch mode", "BASIC;SMART");
-ESPEasyCfgParameter<int> ledOnValue("ledValue", "LED on value", 1023);
+ESPEasyCfgParameter<int> wifiLedOnValue("ledValue", "Wifi LED on value", LED_ON_OFFSET + LED_PWM_MAX);
+ESPEasyCfgParameter<int> buttonLedOnValue("btnLedValue", "Button LED on value", LED_ON_OFFSET + LED_PWM_MAX);
 
 //MQTT objects
 WiFiClient espClient;                                   // TCP client
@@ -40,9 +46,11 @@ PubSubClient client(espClient);                         // MQTT object
 const unsigned long mqttPostingInterval = 10L * 1000L;  // Delay between updates, in milliseconds
 static unsigned long mqttLastPostTime = 0;              // Last time you sent to the server, in milliseconds
 String mqttRelayService;                                // Relay MQTT service name
-String mqttLedService;                                  // LED MQTT service name
 String mqttModeService;                                 // Mode MQTT service name
 String mqttStatusService;                               // Status MQTT service name
+String mqttWifiLedStatusService;                        // Wifi LED status service name
+String mqttButtonLedStatusService;                      // Button LED status service name
+
 uint32_t lastMQTTConAttempt = 0;                        // Last MQTT connection attempt
 enum class MQTTConState {Connecting, Connected, Disconnected, NotUsed};
 MQTTConState mqttState = MQTTConState::Disconnected;
@@ -59,7 +67,92 @@ const int AP_LED_RATE = 2000;
 const int NO_LED_RATE = -1;
 int ledBlinkRate = WIFI_LED_RATE;
 uint32_t lastBlinkTime = 0;
-int previousLedValue = -1;
+int previousWifiLedValue = -1;
+
+
+/**
+ * Tests if the LED parameter is ON
+ */
+bool ledParamToOn(int ledParamValue) {
+  return ledParamValue>=LED_ON_OFFSET;
+}
+
+/**
+ * Get the led brightness 0-1023
+ */
+int ledParamToBrightness(int ledParamValue) {
+  if(ledParamToOn(ledParamValue)){
+    return ledParamValue - LED_ON_OFFSET;
+  }else{
+    return ledParamValue;
+  }
+}
+
+/**
+ * Convert state and brightness to param value
+ */
+int toLedParam(int brightness, bool on){
+  if(on){
+    return brightness + LED_ON_OFFSET;
+  }else{
+    return brightness;
+  }
+}
+
+/**
+ * Convert the led param value to PWM value
+ */
+int ledParamToPWM(int ledParamValue) {
+  int ret = LED_PWM_MAX;
+  if(ledParamToOn(ledParamValue)){
+    ret = LED_PWM_MAX - ledParamToBrightness(ledParamValue);
+  }
+  return ret;
+}
+
+/**
+ * Sets the LED value
+ * @param payload JSON payload to set state/brightness
+ * @param param Parameter to be saved in flash
+ **/
+void setLedValue(const String& payload, ESPEasyCfgParameter<int>& param)
+{
+  StaticJsonDocument<512> doc;
+  DeserializationError error = deserializeJson(doc, payload);
+
+  // Test if parsing succeeds.
+  if (error) {
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.c_str());
+    return;
+  }
+  const char* state = doc["state"];
+  //Gets brightness
+  int brightness = ledParamToBrightness(param.getValue());
+  bool ledOn = ledParamToOn(param.getValue());
+  
+  if(doc.containsKey("brightness")){
+    brightness = doc["brightness"];
+    if(brightness<0){
+      brightness = 0;
+    }else if(brightness>LED_PWM_MAX){
+      brightness = LED_PWM_MAX;
+    }
+  }
+  if(state != NULL){
+    if((strcmp(state, "OFF") == 0) || (strcmp(state, "off") == 0)){
+      ledOn = false;
+    }else if((strcmp(state, "ON") == 0) || (strcmp(state, "on") == 0)){
+      ledOn = true;
+    }
+  }
+  
+  brightness = toLedParam(brightness, ledOn);
+  if(brightness != param.getValue()){
+    param.setValue(brightness);
+    captivePortal.saveParameters();
+  }
+}
 
 /**
  * Callback of MQTT
@@ -76,20 +169,10 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }else{
       digitalWrite(RELAY_PIN, LOW);
     }
-  }else if(strTopic == mqttLedService){
-    int dataVal = data.toInt();
-    int newVal = 0;
-    if(dataVal > 1023){
-      newVal = 1023;
-    }else if(dataVal < 0){
-      newVal = 0;
-    }else{
-      newVal = dataVal;
-    }
-    if(newVal != ledOnValue.getValue()){
-      ledOnValue.setValue(newVal);
-      captivePortal.saveParameters();
-    }
+  }else if(strTopic == (mqttWifiLedStatusService + "/set")){
+    setLedValue(data, wifiLedOnValue);
+  }else if(strTopic == (mqttButtonLedStatusService + "/set")){
+    setLedValue(data, buttonLedOnValue);
   }else if(strTopic == mqttModeService){
     if(data == "BASIC" || data == "SMART"){
       swMode.setValue(data.c_str());
@@ -105,7 +188,9 @@ void configureMQTTServices(){
     mqttStatusService =  mqttName.getValue() +  "/Status";
     mqttRelayService =  mqttName.getValue() + "/Relay";
     mqttModeService =  mqttName.getValue() + "/Mode";
-    mqttLedService = mqttName.getValue() + "/Led";
+    mqttWifiLedStatusService = mqttName.getValue() + "/WifiLED";
+    mqttButtonLedStatusService = mqttName.getValue() + "/ButtonLED";
+
     //Setup MQTT client callbacks and port
     client.setServer(mqttServer.getValue().c_str(), mqttPort.getValue());
     client.setCallback(callback);
@@ -133,7 +218,7 @@ void newState(ESPEasyCfgState state) {
   }else if(state == ESPEasyCfgState::Connected){
     if(mqttServer.getValue().isEmpty()){
       ledBlinkRate = NO_LED_RATE;
-      previousLedValue = -1;
+      previousWifiLedValue = -1;
     }
   }else if(state == ESPEasyCfgState::AP){
     ledBlinkRate = AP_LED_RATE;
@@ -164,7 +249,18 @@ void publishValuesToJSON(String& str){
       break;
   }
   root["mode"] = swMode.toString();
-  root["LED"] = ledOnValue.getValue();
+  serializeJson(root, str);
+}
+
+/**
+ * Prints LED value to JSON
+ **/
+void publishLedToJSON(String& str, int brightness) {
+  str = "";
+  const size_t capacity = JSON_OBJECT_SIZE(2) + 30;
+  StaticJsonDocument<capacity> root;
+  root["brightness"] = ledParamToBrightness(brightness);
+  root["state"] = ledParamToOn(brightness) ? "ON" : "OFF";
   serializeJson(root, str);
 }
 
@@ -219,6 +315,7 @@ void handleDoUpdate(AsyncWebServerRequest *request, const String& filename, size
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
+  pinMode(BTN_LED_PIN, OUTPUT);
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(BUTTON_PIN, INPUT);
   digitalWrite(RELAY_PIN, 0);
@@ -245,8 +342,10 @@ void setup() {
   captivePortal.addParameterGroup(&mqttParamGrp);
   switchParamGrp.add(&swLongPress);
   switchParamGrp.add(&swMode);
-  ledOnValue.setHidden(true);
-  switchParamGrp.add(&ledOnValue);
+  wifiLedOnValue.setHidden(true);
+  buttonLedOnValue.setHidden(true);
+  switchParamGrp.add(&wifiLedOnValue);
+  switchParamGrp.add(&buttonLedOnValue);
   captivePortal.addParameterGroup(&switchParamGrp);
   captivePortal.setStateHandler(newState);
   captivePortal.begin();
@@ -284,6 +383,12 @@ void publishValuesToMQTT(){
     String msg;
     publishValuesToJSON(msg);
     client.publish(mqttStatusService.c_str(), msg.c_str());
+    
+    publishLedToJSON(msg, wifiLedOnValue.getValue());
+    client.publish(mqttWifiLedStatusService.c_str(), msg.c_str());
+
+    publishLedToJSON(msg, buttonLedOnValue.getValue());
+    client.publish(mqttButtonLedStatusService.c_str(), msg.c_str());
   }
 }
 
@@ -291,7 +396,7 @@ void reconnect() {
   //Don't use MQTT if server is not filled
   if(mqttServer.getValue().isEmpty()){
     ledBlinkRate = NO_LED_RATE;
-    previousLedValue = -1;
+    previousWifiLedValue = -1;
     return;
   }
   // Loop until we're reconnected
@@ -334,10 +439,11 @@ void reconnect() {
       Serial.println("connected");
       mqttState = MQTTConState::Connected;
       client.subscribe(mqttRelayService.c_str());
-      client.subscribe(mqttLedService.c_str());
+      client.subscribe((mqttWifiLedStatusService + "/set").c_str());
+      client.subscribe((mqttButtonLedStatusService + "/set").c_str());
       client.subscribe(mqttModeService.c_str());
       ledBlinkRate = NO_LED_RATE; 
-      previousLedValue = -1;
+      previousWifiLedValue = -1;
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -389,12 +495,12 @@ SwitchState getSwitchState(bool &changed, uint32_t now){
 }
 
 void loop() {
+  static int previousButtonLedValue = -1;
   uint32_t now = millis();
   //Keep captive portal active
   captivePortal.loop();
-  
-  int ledValue = ledOnValue.getValue();
 
+  int wifiLedValue = wifiLedOnValue.getValue();
   //Touch switch logic 
   bool changed = false;
   swState = getSwitchState(changed, now);
@@ -406,7 +512,7 @@ void loop() {
       if(swState == SwitchState::RELEASED_SHORT)
         digitalWrite(RELAY_PIN, !digitalRead(RELAY_PIN));
         if(!digitalRead(RELAY_PIN))
-          ledValue = 0;
+          wifiLedValue = 0;
     }else if(swMode.toString() == "SMART"){
       //Smart bulb
       if(mqttState != MQTTConState::Connected){
@@ -414,7 +520,7 @@ void loop() {
         if(swState == SwitchState::RELEASED_SHORT)
           digitalWrite(RELAY_PIN, !digitalRead(RELAY_PIN));
           if(!digitalRead(RELAY_PIN))
-            ledValue = 0;
+            wifiLedValue = 0;
       }else{
         //Force relay closed
         digitalWrite(RELAY_PIN, true);
@@ -447,10 +553,16 @@ void loop() {
       lastBlinkTime = now;
     }
   }else{
-    if(previousLedValue != ledValue){
-      analogWrite(LED_PIN, 1023-ledValue);
-      previousLedValue = ledValue;
+    if(previousWifiLedValue != wifiLedValue){
+      analogWrite(LED_PIN, ledParamToPWM(wifiLedValue));
+      previousWifiLedValue = wifiLedValue;
     }
+  }
+
+  int buttonLedValue = buttonLedOnValue.getValue();
+  if(previousButtonLedValue != buttonLedValue){
+      analogWrite(BTN_LED_PIN, ledParamToPWM(buttonLedValue));
+      previousButtonLedValue = buttonLedValue;
   }
   
   yield();
