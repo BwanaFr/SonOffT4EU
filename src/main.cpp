@@ -20,7 +20,7 @@
 #define BTN_LED_PIN 5
 #endif
 
-const int LED_ON_OFFSET = 10000;
+const int LED_ON_BIT = 1<<31;
 const int LED_PWM_MAX = 1023;
 
 //Objects for captive portal/MQTT
@@ -37,8 +37,8 @@ ESPEasyCfgParameter<String> mqttName("mqttName", "MQTT name", "T4EU", "", "{\"re
 ESPEasyCfgParameterGroup switchParamGrp("Switch");
 ESPEasyCfgParameter<uint32_t> swLongPress("swLongPress", "Long press duration (ms)", 2000, "", "{\"min\":\"100\",\"max\":\"60000\"}");
 ESPEasyCfgEnumParameter swMode("swMode", "Switch mode", "BASIC;SMART");
-ESPEasyCfgParameter<int> wifiLedOnValue("ledValue", "Wifi LED on value", LED_ON_OFFSET + LED_PWM_MAX);
-ESPEasyCfgParameter<int> buttonLedOnValue("btnLedValue", "Button LED on value", LED_ON_OFFSET + LED_PWM_MAX);
+ESPEasyCfgParameter<int> wifiLedOnValue("ledValue", "Wifi LED on value", LED_ON_BIT | LED_PWM_MAX);
+ESPEasyCfgParameter<int> buttonLedOnValue("btnLedValue", "Button LED on value", LED_ON_BIT | LED_PWM_MAX);
 
 //MQTT objects
 WiFiClient espClient;                                   // TCP client
@@ -74,18 +74,14 @@ int previousWifiLedValue = -1;
  * Tests if the LED parameter is ON
  */
 bool ledParamToOn(int ledParamValue) {
-  return ledParamValue>=LED_ON_OFFSET;
+  return (ledParamValue & LED_ON_BIT) != 0;
 }
 
 /**
  * Get the led brightness 0-1023
  */
 int ledParamToBrightness(int ledParamValue) {
-  if(ledParamToOn(ledParamValue)){
-    return ledParamValue - LED_ON_OFFSET;
-  }else{
-    return ledParamValue;
-  }
+  return ledParamValue & ~LED_ON_BIT;
 }
 
 /**
@@ -93,7 +89,7 @@ int ledParamToBrightness(int ledParamValue) {
  */
 int toLedParam(int brightness, bool on){
   if(on){
-    return brightness + LED_ON_OFFSET;
+    return brightness | LED_ON_BIT;
   }else{
     return brightness;
   }
