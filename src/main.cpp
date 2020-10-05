@@ -14,10 +14,10 @@
 #define LED_PIN 13
 #define BTN_LED_PIN 5
 #else
-#define RELAY_PIN 16
+#define RELAY_PIN 5
 #define BUTTON_PIN 0
 #define LED_PIN LED_BUILTIN
-#define BTN_LED_PIN 5
+#define BTN_LED_PIN 16
 #endif
 
 const int LED_ON_BIT = 1<<31;
@@ -32,7 +32,7 @@ ESPEasyCfgParameter<String> mqttServer("mqttServer", "MQTT server", "", "Name or
 ESPEasyCfgParameter<String> mqttUser("mqttUser", "MQTT username", "homeassistant");
 ESPEasyCfgParameter<String> mqttPass("mqttPass", "MQTT password", "");
 ESPEasyCfgParameter<int> mqttPort("mqttPort", "MQTT port", 1883);
-ESPEasyCfgParameter<String> mqttName("mqttName", "MQTT name", "T4EU", "", "{\"reuired\":\"\"}");
+ESPEasyCfgParameter<String> mqttName("mqttName", "MQTT name", "T4EU", "", "{\"required\":\"\"}");
 
 ESPEasyCfgParameterGroup switchParamGrp("Switch");
 ESPEasyCfgParameter<uint32_t> swLongPress("swLongPress", "Long press duration (ms)", 2000, "", "{\"min\":\"100\",\"max\":\"60000\"}");
@@ -173,9 +173,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
     if(data == "BASIC" || data == "SMART"){
       swMode.setValue(data.c_str());
       captivePortal.saveParameters();
-      mqttLastPostTime = 0;
     }
   }
+  mqttLastPostTime = 0;
 }
 
 void configureMQTTServices(){
